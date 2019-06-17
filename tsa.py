@@ -73,7 +73,7 @@ class TrainingSignalAnnealing:
         self.current_step = 0
 
     @property
-    def current_p(self):
+    def current_prob(self):
 
         return self.calculate_step(step=self.current_step)
 
