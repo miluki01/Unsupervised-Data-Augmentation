@@ -421,7 +421,7 @@ class MultiSampleDropout(BaseModule):
         else:
             x = [self.layer(self.dropout(x, dropout=p)).unsqueeze(1) for p in self.dropout_probabilities]
 
-        x = torch.cat(x, 1).mean(1)
+        x = torch.cat(x, dim=1).mean(dim=1)
 
         if self.mean_before_layer:
             x = self.layer(x)

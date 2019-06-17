@@ -79,7 +79,7 @@ class TrainingSignalAnnealing:
                       current_step=from_step, schedule_type=self.schedule_type)
 
 
-class TrainingSignalAnnealingSchedule(BaseModule):
+class TrainingSignalAnnealingScheduler(BaseModule):
 
     # TODO Weighted TSA
 
@@ -126,7 +126,7 @@ class TrainingSignalAnnealingSchedule(BaseModule):
 
         current_max_prob = self.tsa.update()
 
-        indexes = self.get_indexes(predictions, targets, current_max_prob)
+        indexes = self.indexing_function(predictions, targets, current_max_prob)
 
         predictions = predictions[indexes]
         targets = targets[indexes]
