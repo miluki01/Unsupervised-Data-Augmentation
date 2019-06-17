@@ -40,13 +40,12 @@ class TrainingSignalAnnealing:
 
         return np.exp((t / self.total_steps - 1) * 5) * (1 - self.n_classes_smoother) + self.n_classes_smoother
 
-    def __iter__(self):
+    def calculate_step(self, step: int):
 
-        for n in range(self.total_steps):
+        if step >= self.total_steps:
+            step = self.total_steps
 
-            self.current_step = n
-
-            yield self.calculate_step(self.current_step)
+        return self.schedule_function(step)
 
     def update(self, n: int = 1):
 
@@ -61,70 +60,73 @@ class TrainingSignalAnnealing:
 
         return prob
 
-    def calculate_step(self, step: int):
+    def __iter__(self):
 
-        if step >= self.total_steps:
-            step = self.total_steps
+        for n in range(self.total_steps):
 
-        return self.schedule_function(step)
+            self.current_step = n
 
-    def restart(self):
-
-        self.current_step = 0
+            yield self.calculate_step(self.current_step)
 
     @property
     def current_prob(self):
 
         return self.calculate_step(step=self.current_step)
 
+    def restart(self, from_step: int = 0):
 
-class TSAScheduleCrossEntropy(BaseModule):
-
-    def __init__(self, total_steps: int, n_classes: int, current_step: int = 0, schedule_type: str = 'linear'):
-
-        super().__init__()
-
-        self.tsa = TrainingSignalAnnealing(total_steps=total_steps, n_classes=n_classes,
-                                           current_step=current_step, schedule_type=schedule_type)
-
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.activation = torch.nn.Softmax(dim=1)
-
-    def forward(self, predictions, targets):
-
-        current_max_prob = self.tsa.update()
-
-        activated = self.activation(predictions)
-
-        indexes = activated[torch.arange(predictions.size(0)), targets] < current_max_prob
-
-        predictions = predictions[indexes]
-        targets = targets[indexes]
-
-        return predictions, targets
+        self.__init__(total_steps=self.total_steps, n_classes=self.n_classes,
+                      current_step=from_step, schedule_type=self.schedule_type)
 
 
-class TSAScheduleBinaryCrossEntropy(BaseModule):
+class TrainingSignalAnnealingSchedule(BaseModule):
 
-    def __init__(self, total_steps: int, n_classes: int, current_step: int = 0, schedule_type: str = 'linear'):
+    # TODO Weighted TSA
+
+    def __init__(self,
+                 total_steps: int,
+                 n_classes: int,
+                 loss_type: str = 'ce',
+                 current_step: int = 0,
+                 schedule_type: str = 'linear'):
 
         super().__init__()
 
         self.tsa = TrainingSignalAnnealing(total_steps=total_steps, n_classes=n_classes,
                                            current_step=current_step, schedule_type=schedule_type)
 
-        self.criterion = torch.nn.BCELoss()
-        self.activation = torch.nn.Sigmoid()
+        if loss_type == 'ce':
+            self.indexing_function = self._get_indexes_ce
+        elif loss_type == 'bce':
+            self.indexing_function = self._get_indexes_bce
+        else:
+            raise ValueError('Available loss types: "ce" (Cross Entropy) and "bce" (Binary Cross Entropy)')
+
+    def restart(self, from_step: int = 0):
+
+        self.tsa.restart(from_step=from_step)
+
+    @staticmethod
+    def _get_indexes_ce(predictions, targets, current_max_prob):
+
+        predictions = torch.nn.functional.softmax(predictions, dim=1)
+
+        return predictions[torch.arange(predictions.size(0)), targets] < current_max_prob
+
+    @staticmethod
+    def _get_indexes_bce(predictions, targets, current_max_prob):
+
+        predictions = torch.sigmoid(predictions)
+
+        predictions = torch.cat([1 - predictions, predictions], dim=1)
+
+        return predictions[torch.arange(predictions.size(0)), targets.squeeze().long()] < current_max_prob
 
     def forward(self, predictions, targets):
 
         current_max_prob = self.tsa.update()
 
-        activated = self.activation(predictions)
-
-        activated = torch.cat([1 - activated, activated], dim=1)
-
-        indexes = activated[torch.arange(predictions.size(0)), targets.squeeze().long()] < current_max_prob
+        indexes = self.get_indexes(predictions, targets, current_max_prob)
 
         predictions = predictions[indexes]
         targets = targets[indexes]
