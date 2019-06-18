@@ -472,3 +472,96 @@ class SentenceEncoder:
                 correct_tokens.append(self.SYMBOLS_MAPPER.get(tmp_correct_token, tmp_correct_token))
 
         return correct_tokens
+
+
+class ExternalPreprocessor:
+
+    def __init__(self):
+
+        pass
+
+    @staticmethod
+    def lemma_modification(lemma: str) -> str:
+        if len(lemma) > 1 and "." in lemma:
+            res = lemma.strip(".")
+            if "." in res:
+                res = res.replace(".", "_")
+        else:
+            res = lemma
+        return res
+
+    @staticmethod
+    def get_tense(token):
+
+        result = ''
+
+        if token.get('grammem_info', {}).get('part_of_speech') == 'V':
+            if 'ambiguous' in token['grammem_info']:
+                result += '_' + token['grammem_info']['ambiguous'][0].get('tense', '')
+            else:
+                result += '_' + token['grammem_info'].get('tense', '')
+
+        return result
+
+    @staticmethod
+    def get_mood(token):
+
+        result = ''
+
+        if token.get('grammem_info', {}).get('part_of_speech') == 'V':
+            if 'ambiguous' in token['grammem_info']:
+                result += '_' + token['grammem_info']['ambiguous'][0].get('mood', '')
+            else:
+                result += '_' + token['grammem_info'].get('mood', '')
+
+        return result
+
+    def return_lemmas_only(self,
+                           token_desc_list: list,
+                           include_sentence_endpoint: bool = True,
+                           show_verb_mood: bool = False) -> list:
+        """
+        Конвертировать список токенов в строку без пунктуации, содержащую леммы и замены на тип токена.
+        Предложения разделяются точкой
+        :param token_desc_list: Список токенов (дикты), include_sentence_endpoint -- принтить ли фейковую точку, bool
+        :param include_sentence_endpoint:
+        :param show_verb_mood:
+        :return: Строка, содержащую леммы и замены на тип токена.
+        """
+
+        final_line = []
+
+        for token in token_desc_list:
+
+            if 'composite_token_type' in token:
+                if token['is_beginning_of_composite']:
+                    token_type = token['composite_token_type']
+                else:
+                    continue
+
+            else:
+                token_type = token.get('token_type')
+
+            if token_type != 'SENTENCE_ENDPOINT_TOKEN':
+
+                grammem_info = token.get('grammem_info')
+                pos = grammem_info.get('part_of_speech')
+
+                if pos != "PUNCT":
+
+                    if token_type is not None and token_type != 'ANIMACY_TOKEN':
+                        final_line.append(token_type)
+
+                    elif not token.get('is_stop_word'):
+
+                        lemma = self.lemma_modification(token.get('lemma'))
+
+                        if show_verb_mood:
+                            lemma = '{}{}{}'.format(lemma, self.get_tense(token), self.get_mood(token))
+
+                        final_line.append(lemma)
+
+            elif include_sentence_endpoint:
+                final_line.append(token['text'])
+
+        return final_line
