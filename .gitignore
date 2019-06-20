@@ -75,6 +75,7 @@ target/
 .idea/
 
 .DS_Store
+*.jsonl
 
 # IPython
 profile_default/

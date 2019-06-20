@@ -37,8 +37,8 @@ class Embedding(BaseModule):
             if embedding_matrix is not None:
 
                 embedding_matrix = torch.Tensor(embedding_matrix)
-                self.embedding = self.embedding.from_pre_trained(embeddings=embedding_matrix,
-                                                                 freeze=self.freeze_pre_trained_embeddings)
+                self.embedding = self.embedding.from_pretrained(embeddings=embedding_matrix,
+                                                                freeze=self.freeze_pre_trained_embeddings)
 
                 self.training = False
 

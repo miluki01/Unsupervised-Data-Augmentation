@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import math
 import json
-from typing import List, Optional, Union, Generator, Any
+from typing import List, Optional, Union, Generator, Any, Dict
 import sentencepiece as sp
 from overrides import overrides
 from tools.utils import count_lines
@@ -122,6 +122,15 @@ class Data:
 
         return self.batch_generator()
 
+    @staticmethod
+    def read_json_line(line: str):
+
+        line = line.strip()
+
+        data = json.loads(line)
+
+        return data
+
     def line_processing(self, line: str) -> Any:
 
         raise NotImplementedError
@@ -133,6 +142,44 @@ class Data:
     def batch_processing(self, batch: Any) -> Any:
 
         raise NotImplementedError
+
+
+# class VocabularyData(Data):
+#
+#     def __init__(self,
+#                  token2index: Optional[Dict[str, int]] = None,
+#                  target2index: Optional[Dict[str, int]] = None,
+#                  batch_size: int = 32,
+#                  max_sequence_length: int = 64,
+#                  validation_split_ratio: float = 0.01,
+#                  shuffle: bool = True,
+#                  verbose: bool = True):
+#
+#         super().__init__(batch_size=batch_size,
+#                          max_sequence_length=max_sequence_length,
+#                          validation_split_ratio=validation_split_ratio,
+#                          shuffle=shuffle,
+#                          verbose=verbose)
+#
+#         self.token2index = token2index if token2index is not None else {}
+#         self.index2token = {value: key for key, value in self.token2index.items()}
+#         self.collect_vocab = False if token2index else True
+#
+#         self.target2index = target2index if target2index is not None else {}
+#         self.index2target = {value: key for key, value in self.target2index.items()}
+#         self.collect_target_vocab = False if target2index else True
+#
+#     def line_processing(self, line: str) -> Any:
+#
+#         raise NotImplementedError
+#
+#     def padding(self, sequence: Union[List[Any], np.ndarray]) -> np.ndarray:
+#
+#         raise NotImplementedError
+#
+#     def batch_processing(self, batch: Any) -> Any:
+#
+#         raise NotImplementedError
 
 
 class SentencePieceData(Data):
