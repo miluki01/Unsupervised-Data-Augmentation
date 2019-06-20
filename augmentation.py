@@ -150,7 +150,7 @@ from typing import List, Optional, Union, Generator, Any, Dict
 
 class TfIdfAugmentation:
 
-    def __init__(self, indexes_matrix, index2prob, k_top_words=5):
+    def __init__(self, indexes_matrix, index2prob, k_top_words=500):
 
         self.indexes_matrix = indexes_matrix
 
