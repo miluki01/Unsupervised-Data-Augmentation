@@ -42,7 +42,7 @@ class TrainingSignalAnnealing:
 
     def calculate_step(self, step: int):
 
-        if step >= self.total_steps:
+        if step > self.total_steps:
             step = self.total_steps
 
         return self.schedule_function(step)
