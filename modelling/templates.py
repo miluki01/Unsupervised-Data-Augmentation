@@ -7,13 +7,72 @@ class SequenceTemplate(BaseModule):
 
     def __init__(self, *models):
 
-        super(SequenceTemplate, self).__init__()
+        super().__init__()
 
         self.model = torch.nn.Sequential(*models).to(self.device)
 
     def forward(self, x):
 
         x = self.model(x)
+
+        return x
+
+
+class ParallelAggregation(BaseModule):
+
+    AVAILABLE_MODES = ['mean', 'sum', 'concat']
+
+    def __init__(self, layers, aggregation_mode='mean', concat_dim=-1):
+
+        super().__init__()
+
+        self.layers = torch.nn.ModuleList(layers)
+
+        self.aggregation_mode = aggregation_mode
+        self.concat_dim = concat_dim
+
+        if self.aggregation_mode == 'mean':
+            self.aggregation_function = self._mean
+        elif self.aggregation_mode == 'sum':
+            self.aggregation_function = self._sum
+        elif self.aggregation_mode in ['concat', 'cat']:
+            self.aggregation_function = self._cat
+        else:
+            raise Exception(f'available modes: {", ".join(self.AVAILABLE_MODES)}')
+
+    @staticmethod
+    def _list2tensor(x):
+
+        x = [sample.unsqueeze(0) for sample in x]
+        x = torch.cat(x)
+
+        return x
+
+    def _mean(self, x):
+
+        x = self._list2tensor(x)
+
+        x = torch.mean(x, dim=0)
+
+        return x
+
+    def _sum(self, x):
+
+        x = self._list2tensor(x)
+
+        x = torch.sum(x, dim=0)
+
+        return x
+
+    def _cat(self, x):
+
+        return torch.cat(x, dim=self.concat_dim)
+
+    def forward(self, x):
+
+        x = [layer(x) for layer in self.layers]
+
+        x = self.aggregation_function(x)
 
         return x
 

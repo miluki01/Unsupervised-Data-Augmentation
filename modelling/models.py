@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from modelling.layers import *
 from modelling.templates import SequenceTemplate
+from modelling import layers, templates
 
 
 # embeddings
@@ -257,7 +258,7 @@ class MeanAndCNNEmbedding(BaseModule):
 
         self.mean_embedding = Mean(dim=2)
 
-        self.cnn = CNN(input_size=embedding_dim,
+        self.cnn = CNN(in_channels=embedding_dim,
                        out_channels=embedding_dim,
                        kernel_size_convolution=1,
                        sequence_length=sequence_length,
@@ -290,7 +291,7 @@ class CNNEmbedding(BaseModule):
 
         super(CNNEmbedding, self).__init__()
 
-        self.cnns = torch.nn.ModuleList(modules=[CNN(input_size=embedding_dim,
+        self.cnns = torch.nn.ModuleList(modules=[CNN(in_channels=embedding_dim,
                                                      out_channels=cnn_channels,
                                                      kernel_size_convolution=kernel_size_convolution,
                                                      sequence_length=sequence_length,
@@ -395,7 +396,7 @@ class Inception(BaseModule):
 
         super(Inception, self).__init__()
 
-        self.cnns = torch.nn.ModuleList(modules=[CNN(input_size=cnn_in_channels,
+        self.cnns = torch.nn.ModuleList(modules=[CNN(in_channels=cnn_in_channels,
                                                      out_channels=cnn_out_channels,
                                                      kernel_size_convolution=kernel_size_convolution,
                                                      sequence_length=sequence_length,
@@ -437,35 +438,226 @@ class SelfAttention(BaseModule):
 
 class TransformerEncoder(BaseModule):
 
-    def __init__(self, n_head, model_dim, inner_dim, key_dim, value_dim, dropout=0.1, return_attention=False):
+    def __init__(self, attention_layer, model_dim, inner_dim,
+                 pw_ff_dropout=0.1, universal_n_repeater=1, need_weights=False):
 
         super(TransformerEncoder, self).__init__()
 
-        self.attention = MultiHeadAttention(n_head=n_head, model_dim=model_dim, key_dim=key_dim,
-                                            value_dim=value_dim, dropout=dropout, return_attention=True)
+        self.attention = attention_layer
 
-        self.position_wise_feed_forward = PositionWiseFeedForward(size_in=model_dim,
-                                                                  size_out=inner_dim,
-                                                                  dropout=dropout)
+        self.attention_layer_norm = torch.nn.LayerNorm(model_dim)
 
-        self.return_attention = return_attention
+        self.position_wise_feed_forward = PositionWiseFeedForward(in_features=model_dim,
+                                                                  inner_features=inner_dim,
+                                                                  dropout=pw_ff_dropout)
 
-    def forward(self, encoder_input, non_pad_mask=None, self_attention_mask=None):
+        self.universal_n_repeater = universal_n_repeater
 
-        encoder_output, encoder_self_attn = self.attention(encoder_input,
-                                                           encoder_input,
-                                                           encoder_input,
-                                                           mask=self_attention_mask)
+        assert self.universal_n_repeater > 0, "universal_n_repeater must be greater than zero"
 
-        if non_pad_mask is not None:
-            encoder_output *= non_pad_mask
+        self.need_weights = need_weights
 
-        encoder_output = self.position_wise_feed_forward(encoder_output)
+    def forward(self, x, key_padding_mask=None, attention_mask=None):
 
-        if non_pad_mask is not None:
-            encoder_output *= non_pad_mask
+        for n in range(self.universal_n_repeater):
 
-        if self.return_attention:
-            return encoder_output, encoder_self_attn
+            residual = x
+
+            x, self_attention = self.attention(x, x, x,
+                                               key_padding_mask=key_padding_mask,
+                                               attention_mask=attention_mask,
+                                               need_weights=self.need_weights)
+
+            x = self.attention_layer_norm(x + residual)
+
+            x = self.position_wise_feed_forward(x)
+
+        if self.need_weights:
+            return x, self_attention
         else:
-            return encoder_output
+            return x
+
+
+# class EvolvedTransformerEncoder(BaseModule):
+#
+#     def __init__(self, embedding_dim, num_heads, sequence_length):
+#
+#         super().__init__()
+#
+#         self.embedding_dim = embedding_dim
+#         self.num_heads = num_heads
+#         self.sequence_length = sequence_length
+#
+#         self.input_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim)
+#
+#         self.gated_linear_unit = layers.GatedLinearUnit(in_features=self.embedding_dim, out_features=self.embedding_dim)
+#
+#         self.glu_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim)
+#
+#         self.left_cnn = layers.CNN(in_channels=self.embedding_dim,
+#                                    out_channels=self.embedding_dim * 4,
+#                                    kernel_size_convolution=1,
+#                                    sequence_length=self.sequence_length,
+#                                    base_pool_layer=None)
+#
+#         self.right_cnn = layers.CNN(in_channels=self.embedding_dim,
+#                                     out_channels=int(self.embedding_dim / 2),
+#                                     kernel_size_convolution=3,
+#                                     convolution_padding_same=True,
+#                                     sequence_length=self.sequence_length,
+#                                     base_pool_layer=None)
+#
+#         self.right_cnn_padding = torch.nn.ConstantPad1d(
+#             padding=(0, int(self.embedding_dim * 4 - self.embedding_dim / 2)),
+#             value=0.)
+#
+#         self.cnn_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim * 4)
+#
+#         self.separable_cnn = layers.CNN(in_channels=self.embedding_dim * 4,
+#                                         out_channels=self.embedding_dim,
+#                                         kernel_size_convolution=9,
+#                                         convolution_groups=self.embedding_dim,
+#                                         convolution_padding_same=True,
+#                                         sequence_length=self.sequence_length,
+#                                         base_pool_layer=None,
+#                                         activation_function=None)
+#
+#         self.sep_cnn_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim)
+#
+#         self.attention = layers.MultiheadAttention(embedding_dim=self.embedding_dim, num_heads=self.num_heads)
+#
+#         self.attention_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim)
+#
+#         self.position_wise_feed_forward = layers.PositionWiseFeedForward(in_features=self.embedding_dim,
+#                                                                          inner_features=self.embedding_dim * 4,
+#                                                                          residual=False)
+#
+#     def forward(self, x):
+#
+#         residual = x
+#
+#         x = self.input_layer_norm(x)
+#
+#         x = self.gated_linear_unit(x)
+#
+#         x = residual + x
+#
+#         residual = x
+#
+#         x = self.glu_layer_norm(x)
+#
+#         x_left = self.left_cnn(x)
+#         x_right = self.right_cnn_padding(self.right_cnn(x))
+#
+#         x = x_left + x_right
+#
+#         x = self.cnn_layer_norm(x)
+#
+#         x = self.separable_cnn(x)
+#
+#         x = residual + x
+#
+#         residual = x
+#
+#         x = self.sep_cnn_layer_norm(x)
+#
+#         x, _ = self.attention(x)
+#
+#         x = residual + x
+#
+#         residual = x
+#
+#         x = self.attention_layer_norm(x)
+#
+#         x = self.position_wise_feed_forward(x)
+#
+#         x = residual + x
+#
+#         return x
+
+
+class EvolvedTransformerEncoder(BaseModule):
+
+    def __init__(self, embedding_dim, num_heads, sequence_length):
+
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
+        self.sequence_length = sequence_length
+
+        self.gated_linear_unit = layers.Residual(
+            layer=layers.GatedLinearUnit(in_features=self.embedding_dim,
+                                         out_features=self.embedding_dim),
+            normalization_layer=torch.nn.LayerNorm(normalized_shape=self.embedding_dim),
+            normalization_first=True
+        )
+
+        left_cnn = layers.CNN(in_channels=self.embedding_dim,
+                              out_channels=self.embedding_dim * 4,
+                              kernel_size_convolution=1,
+                              sequence_length=self.sequence_length,
+                              base_pool_layer=None)
+
+        right_cnn = layers.CNN(in_channels=self.embedding_dim,
+                               out_channels=int(self.embedding_dim / 2),
+                               kernel_size_convolution=3,
+                               convolution_padding_same=True,
+                               sequence_length=self.sequence_length,
+                               base_pool_layer=None)
+
+        right_cnn_padding = torch.nn.ConstantPad1d(padding=(0, int(self.embedding_dim * 4 - self.embedding_dim / 2)),
+                                                   value=0.)
+
+        right_cnn = templates.SequenceTemplate(right_cnn, right_cnn_padding)
+
+        aggregated_cnn = templates.ParallelAggregation(layers=(left_cnn, right_cnn), aggregation_mode='sum')
+
+        aggregated_cnn_layer_norm = torch.nn.LayerNorm(normalized_shape=self.embedding_dim * 4)
+
+        separable_cnn = layers.CNN(in_channels=self.embedding_dim * 4,
+                                   out_channels=self.embedding_dim // 2,
+                                   kernel_size_convolution=9,
+                                   convolution_groups=self.embedding_dim // 2,
+                                   convolution_padding_same=True,
+                                   sequence_length=self.sequence_length,
+                                   base_pool_layer=None,
+                                   activation_function=None)
+
+        separable_cnn_padding = torch.nn.ConstantPad1d(padding=(0, self.embedding_dim // 2), value=0.)
+
+        separable_cnn_with_padding = templates.SequenceTemplate(separable_cnn, separable_cnn_padding)
+
+        self.cnn = layers.Residual(
+            layer=templates.SequenceTemplate(aggregated_cnn, aggregated_cnn_layer_norm, separable_cnn_with_padding),
+            normalization_layer=torch.nn.LayerNorm(normalized_shape=self.embedding_dim),
+            normalization_first=True
+        )
+
+        self.attention = layers.Residual(
+            layer=layers.MultiheadAttention(embedding_dim=self.embedding_dim,
+                                            num_heads=self.num_heads,
+                                            output_only=True),
+            normalization_layer=torch.nn.LayerNorm(normalized_shape=self.embedding_dim),
+            normalization_first=True
+        )
+
+        self.position_wise_feed_forward = layers.Residual(
+            layer=layers.PositionWiseFeedForward(in_features=self.embedding_dim,
+                                                 inner_features=self.embedding_dim * 4,
+                                                 residual=False),
+            normalization_layer=torch.nn.LayerNorm(normalized_shape=self.embedding_dim),
+            normalization_first=True
+        )
+
+    def forward(self, x):
+
+        x = self.gated_linear_unit(x)
+
+        x = self.cnn(x)
+
+        x = self.attention(x)
+
+        x = self.position_wise_feed_forward(x)
+
+        return x

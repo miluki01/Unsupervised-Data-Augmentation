@@ -3,6 +3,7 @@ from collections import defaultdict
 from functools import reduce
 import torch
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+import torch.nn.functional as F
 
 
 # basics
@@ -153,10 +154,9 @@ class GELU(BaseModule):
         Used in transformer
         """
 
-        super(GELU, self).__init__()
+        super().__init__()
 
         self.const_1 = torch.Tensor([0.044715]).to(self.device)
-        # self.const_2 = torch.pow(torch.Tensor([2 / 3.141592653589793]), 0.5)
         self.const_2 = torch.Tensor([(2 / 3.141592653589793) ** 0.5]).to(self.device)
 
     def forward(self, x):
@@ -171,16 +171,28 @@ class GELU(BaseModule):
 # useful tools
 class Residual(BaseModule):
 
-    def __init__(self, layer, residual_layer=None, dropout_layer=None, normalization_layer=None):
+    def __init__(self,
+                 layer,
+                 residual_layer=None,
+                 dropout_layer=None,
+                 normalization_layer=None,
+                 normalization_first=False):
 
         super(Residual, self).__init__()
+
+        if normalization_first:
+            self.normalization_layer = normalization_layer
 
         self.layer = layer
 
         self.residual_layer = residual_layer
+
         self.dropout_layer = dropout_layer
 
-        self.normalization_layer = normalization_layer
+        if not normalization_first:
+            self.normalization_layer = normalization_layer
+
+        self.normalization_first = normalization_first
 
     def forward(self, *x):
 
@@ -192,6 +204,11 @@ class Residual(BaseModule):
         if self.residual_layer is not None:
             residual = self.residual_layer(residual)
 
+        if self.normalization_first and isinstance(x, (list, tuple)):
+            x = (self.normalization_layer(x[0]), ) + x[1:]
+        elif self.normalization_first and not isinstance(x, (list, tuple)):
+            x = self.normalization_layer(x)
+
         layer_output = self.layer(*x)
 
         if isinstance(layer_output, (list, tuple)):
@@ -201,7 +218,7 @@ class Residual(BaseModule):
 
             output = layer_output[0] + residual
 
-            if self.normalization_layer:
+            if self.normalization_layer and not self.normalization_first:
                 output = self.normalization_layer(output)
 
             layer_output = (output, ) + layer_output[1:]
@@ -213,7 +230,7 @@ class Residual(BaseModule):
 
             layer_output += residual
 
-            if self.normalization_layer:
+            if self.normalization_layer and not self.normalization_first:
                 layer_output = self.normalization_layer(layer_output)
 
         return layer_output
@@ -366,12 +383,12 @@ class WeightDrop(BaseModule):
             if self.variational:
 
                 mask = torch.nn.Parameter(torch.ones(raw_w.size(0), 1)).to(self.device)
-                mask = torch.nn.functional.dropout(mask, p=self.dropout, training=True)
+                mask = F.dropout(mask, p=self.dropout, training=True)
                 w = mask.expand_as(raw_w) * raw_w
 
             else:
 
-                w = torch.nn.functional.dropout(raw_w, p=self.dropout, training=self.training)
+                w = F.dropout(raw_w, p=self.dropout, training=self.training)
 
             setattr(self.module, name_w, w)
 
@@ -414,7 +431,12 @@ class MultiSampleDropout(BaseModule):
     def forward(self, x):
 
         if not self.is_training:
-            return self.layer(x)
+
+            x = self.layer(x)
+
+            x = torch.mean([x for _ in range(len(self.dropout_probabilities))])
+
+            return x
 
         if self.mean_before_layer:
             x = [self.dropout(x, dropout=p).unsqueeze(1) for p in self.dropout_probabilities]
@@ -436,11 +458,11 @@ class MultiSampleDropout(BaseModule):
 # fully connected layers
 class LinearWithActivation(BaseModule):
 
-    def __init__(self, size_in, size_out, activation_function=torch.nn.ReLU()):
+    def __init__(self, in_features, out_features, activation_function=torch.nn.ReLU()):
 
         super(LinearWithActivation, self).__init__()
 
-        self.linear = torch.nn.Linear(size_in, size_out)
+        self.linear = torch.nn.Linear(in_features, out_features)
         self.activation_function = activation_function
 
     def forward(self, x):
@@ -453,13 +475,13 @@ class LinearWithActivation(BaseModule):
 
 class Highway(BaseModule):
 
-    def __init__(self, size_in, size_out, activation_function=torch.nn.ReLU()):
+    def __init__(self, in_features, out_features, activation_function=torch.nn.ReLU()):
 
         super(Highway, self).__init__()
 
-        self.nonlinear = torch.nn.Linear(size_in, size_out)
-        self.linear = torch.nn.Linear(size_in, size_out)
-        self.gate = torch.nn.Linear(size_in, size_out)
+        self.nonlinear = torch.nn.Linear(in_features, out_features)
+        self.linear = torch.nn.Linear(in_features, out_features)
+        self.gate = torch.nn.Linear(in_features, out_features)
 
         self.gate_function = torch.nn.Sigmoid()
         self.activation_function = activation_function
@@ -486,6 +508,28 @@ class Highway(BaseModule):
         return x
 
 
+class GatedLinearUnit(BaseModule):
+    """
+    Implementation of this https://arxiv.org/pdf/1612.08083.pdf
+    """
+
+    def __init__(self, in_features, out_features):
+
+        super().__init__()
+
+        self.linear = torch.nn.Linear(in_features=in_features, out_features=out_features)
+        self.gate = torch.nn.Linear(in_features=in_features, out_features=out_features)
+
+    def forward(self, x):
+
+        x = self.linear(x)
+        gate = self.linear(x)
+
+        x = x * torch.sigmoid(gate)
+
+        return x
+
+
 # layers
 class BasePositionWiseFeedForward(BaseModule):
 
@@ -494,14 +538,14 @@ class BasePositionWiseFeedForward(BaseModule):
     """
 
     def __init__(self,
-                 size_in,
-                 size_out,
-                 activation_function=GELU()):
+                 in_features,
+                 inner_features,
+                 activation_function=torch.nn.ReLU()):
 
         super(BasePositionWiseFeedForward, self).__init__()
 
-        self.layer_1 = torch.nn.Conv1d(size_in, size_out, 1)  # position-wise
-        self.layer_2 = torch.nn.Conv1d(size_out, size_in, 1)  # position-wise
+        self.layer_1 = torch.nn.Conv1d(in_features, inner_features, 1)  # position-wise
+        self.layer_2 = torch.nn.Conv1d(inner_features, in_features, 1)  # position-wise
 
         self.activation_function = activation_function
 
@@ -525,18 +569,24 @@ class PositionWiseFeedForward(BaseModule):
     """
 
     def __init__(self,
-                 size_in,
-                 size_out,
+                 in_features,
+                 inner_features,
                  dropout=0.1,
-                 activation_function=GELU()):
+                 residual=True,
+                 activation_function=torch.nn.ReLU()):
 
         super(PositionWiseFeedForward, self).__init__()
 
-        self.layer = Residual(layer=BasePositionWiseFeedForward(size_in=size_in,
-                                                                size_out=size_out,
-                                                                activation_function=activation_function),
-                              dropout_layer=torch.nn.Dropout(dropout),
-                              normalization_layer=torch.nn.LayerNorm(size_in))
+        self.residual = residual
+
+        self.layer = BasePositionWiseFeedForward(in_features=in_features,
+                                                 inner_features=inner_features,
+                                                 activation_function=activation_function)
+
+        if self.residual:
+            self.layer = Residual(layer=self.layer,
+                                  dropout_layer=torch.nn.Dropout(dropout),
+                                  normalization_layer=torch.nn.LayerNorm(in_features))
 
     def forward(self, x):
 
@@ -591,8 +641,8 @@ class FullyConnected(BaseModule):
                 else:
                     current_base_layer = self.base_layer
 
-                layer = current_base_layer(size_in=self.sizes[n],
-                                           size_out=out_features,
+                layer = current_base_layer(in_features=self.sizes[n],
+                                           out_features=out_features,
                                            activation_function=current_activation_function)
 
                 if residual and self.sizes[n] == out_features:
@@ -771,7 +821,7 @@ class RNN(BaseModule):
 class CNN(BaseModule):
 
     def __init__(self,
-                 input_size,
+                 in_channels,
                  out_channels,
                  kernel_size_convolution,
                  sequence_length,
@@ -788,21 +838,25 @@ class CNN(BaseModule):
                  declared_pool_layer=None,
                  activation_function=torch.nn.ReLU()):
         """
-        Simple CNN1D layer. All you need is set input_size, out_channels and kernel_size_convolution
+        Simple CNN1D layer. All you need is set in_channels, out_channels and kernel_size_convolution
         """
 
-        super(CNN, self).__init__()
+        super().__init__()
 
-        self.input_size = input_size
-        self.sequence_length = sequence_length
-        self.out_channels = out_channels
         self.global_pooling = global_pooling
 
         if convolution_padding_same:
-            convolution_padding = kernel_size_convolution - 1
 
-        self.convolution_layer = torch.nn.Conv1d(in_channels=self.input_size,
-                                                 out_channels=self.out_channels,
+            assert sequence_length is not None, 'need set sequence length for "same" padding'
+
+            convolution_padding = (convolution_stride * (sequence_length - 1) -
+                                   sequence_length + kernel_size_convolution +
+                                   (kernel_size_convolution - 1) * (convolution_dilation - 1)) / 2
+
+            convolution_padding = int(convolution_padding)
+
+        self.convolution_layer = torch.nn.Conv1d(in_channels=in_channels,
+                                                 out_channels=out_channels,
                                                  kernel_size=kernel_size_convolution,
                                                  stride=convolution_stride,
                                                  padding=convolution_padding,
@@ -812,11 +866,13 @@ class CNN(BaseModule):
         self.activation_function = activation_function
 
         if declared_pool_layer is not None:
+
             self.pool_layer = declared_pool_layer
+
         elif base_pool_layer is not None:
 
             if self.global_pooling:
-                kernel_size_pool = self.sequence_length - kernel_size_convolution + 1
+                kernel_size_pool = sequence_length - kernel_size_convolution + 1
             elif kernel_size_pool is None:
                 kernel_size_pool = kernel_size_convolution
 
@@ -826,17 +882,18 @@ class CNN(BaseModule):
         else:
             self.pool_layer = None
 
-    def forward(self, x, x_lengths=None):
+    def forward(self, x: torch.Tensor):
         """
-        return correct batch with (batch_size x seq_len x input_size)  sizes
+        return correct batch with (batch_size x seq_len x in_channels)  sizes
         """
 
-        # Turn (batch_size x seq_len x input_size) into (batch_size x input_size x seq_len) for CNN
+        # Turn (batch_size x seq_len x in_channels) into (batch_size x in_channels x seq_len) for CNN
         x = x.transpose(1, 2)
 
         x = self.convolution_layer(x)
 
-        x = self.activation_function(x)
+        if self.activation_function is not None:
+            x = self.activation_function(x)
 
         if self.pool_layer is not None:
             x = self.pool_layer(x)
@@ -844,7 +901,7 @@ class CNN(BaseModule):
         if self.global_pooling:
             x = x.squeeze()
         else:
-            # Turn (batch_size x input_size x seq_len) into (batch_size x seq_len x input_size)
+            # Turn (batch_size x in_channels x seq_len) into (batch_size x seq_len x in_channels)
             x = x.transpose(1, 2)
 
         return x
@@ -888,7 +945,7 @@ class ScaledDotProductAttention(BaseModule):
             return output
 
 
-class MultiHeadAttention(BaseModule):
+class OldMultiheadAttention(BaseModule):
     """
     From transformer
     """
@@ -955,6 +1012,311 @@ class MultiHeadAttention(BaseModule):
     def extra_repr(self):
 
         report = [self.model_report, 'Heads: {}'.format(self.n_head)]
+
+        return '\n'.join(report)
+
+
+class MultiheadAttention(BaseModule):
+    r"""Allows the model to jointly attend to information
+    from different representation subspaces.
+    See reference: Attention Is All You Need
+
+    .. math::
+        \text{MultiHead}(Q, K, V) = \text{Concat}(head_1,\dots,head_h)W^O
+        \text{where} head_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)
+
+    Args:
+        embedding_dim: total dimension of the model
+        num_heads: parallel attention layers, or heads
+
+    Examples::
+
+        >>> multihead_attention = nn.MultiheadAttention(embedding_dim, num_heads)
+        >>> attention_output, attention_output_weights = multihead_attention(query, key, value)
+    """
+
+    def __init__(self,
+                 embedding_dim,
+                 num_heads,
+                 dropout=0.1,
+                 bias=True,
+                 add_bias_kv=False,
+                 add_zero_attention=False,
+                 output_only=False):
+
+        super(MultiheadAttention, self).__init__()
+
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.head_dim = embedding_dim // num_heads
+        assert self.head_dim * num_heads == self.embedding_dim, "embedding_dim must be divisible by num_heads"
+        self.scaling = self.head_dim ** -0.5
+
+        self.in_projection_weight = torch.nn.parameter.Parameter(torch.empty(3 * embedding_dim, embedding_dim))
+        if bias:
+            self.in_projection_bias = torch.nn.parameter.Parameter(torch.empty(3 * embedding_dim))
+        else:
+            self.register_parameter('in_projection_bias', None)
+        self.out_projection = torch.nn.Linear(embedding_dim, embedding_dim, bias=bias)
+
+        if add_bias_kv:
+            self.bias_k = torch.nn.parameter.Parameter(torch.empty(1, 1, embedding_dim))
+            self.bias_v = torch.nn.parameter.Parameter(torch.empty(1, 1, embedding_dim))
+        else:
+            self.bias_k = self.bias_v = None
+
+        self.add_zero_attention = add_zero_attention
+
+        self.output_only = output_only
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        torch.nn.init.xavier_uniform_(self.in_projection_weight[:self.embedding_dim, :])
+        torch.nn.init.xavier_uniform_(self.in_projection_weight[self.embedding_dim:(self.embedding_dim * 2), :])
+        torch.nn.init.xavier_uniform_(self.in_projection_weight[(self.embedding_dim * 2):, :])
+
+        torch.nn.init.xavier_uniform_(self.out_projection.weight)
+        if self.in_projection_bias is not None:
+            torch.nn.init.constant_(self.in_projection_bias, 0.)
+            torch.nn.init.constant_(self.out_projection.bias, 0.)
+        if self.bias_k is not None:
+            torch.nn.init.xavier_normal_(self.bias_k)
+        if self.bias_v is not None:
+            torch.nn.init.xavier_normal_(self.bias_v)
+
+    def forward(self, query, key=None, value=None, key_padding_mask=None, incremental_state=None,
+                need_weights=False, static_kv=False, attention_mask=None, batch_first=True):
+        """
+        Inputs of forward function
+            query: [target length, batch size, embed dim]
+            key: [sequence length, batch size, embed dim]
+            value: [sequence length, batch size, embed dim]
+            key_padding_mask: if True, mask padding based on batch size
+            incremental_state: if provided, previous time steps are cashed
+            need_weights: output attention_output_weights
+            static_kv: key and value are static
+
+        Outputs of forward function
+            attention_output: [target length, batch size, embed dim]
+            attention_output_weights: [batch size, target length, sequence length]
+        """
+
+        if key is None:
+            key = query
+
+        if value is None:
+            value = query
+
+        if batch_first:
+            query = query.permute(1, 0, 2)
+            key = key.permute(1, 0, 2)
+            value = value.permute(1, 0, 2)
+
+        qkv_same = query.data_ptr() == key.data_ptr() == value.data_ptr()
+        kv_same = key.data_ptr() == value.data_ptr()
+
+        target_length, batch_size, embedding_dim = query.size()
+
+        assert embedding_dim == self.embedding_dim
+        assert key.size() == value.size()
+
+        if incremental_state is not None:
+
+            saved_state = self._get_input_buffer(incremental_state)
+
+            if 'prev_key' in saved_state:
+                # previous time steps are cached - no need to recompute
+                # key and value if they are static
+                if static_kv:
+                    assert kv_same and not qkv_same
+                    key = value = None
+        else:
+            saved_state = None
+
+        if qkv_same:
+            # self-attention
+            q, k, v = self._in_projection_qkv(query)
+        elif kv_same:
+
+            # encoder-decoder attention
+            q = self._in_projection_q(query)
+
+            if key is None:
+                assert value is None
+                k = v = None
+            else:
+                k, v = self._in_projection_kv(key)
+
+        else:
+
+            q = self._in_projection_q(query)
+            k = self._in_projection_k(key)
+            v = self._in_projection_v(value)
+
+        q *= self.scaling
+
+        if self.bias_k is not None:
+
+            assert self.bias_v is not None
+
+            k = torch.cat([k, self.bias_k.repeat(1, batch_size, 1)])
+            v = torch.cat([v, self.bias_v.repeat(1, batch_size, 1)])
+
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask,
+                                            attention_mask.new_zeros(attention_mask.size(0), 1)], dim=1)
+
+            if key_padding_mask is not None:
+                key_padding_mask = torch.cat(
+                    [key_padding_mask, key_padding_mask.new_zeros(key_padding_mask.size(0), 1)], dim=1)
+
+        q = q.contiguous().view(target_length, batch_size * self.num_heads, self.head_dim).transpose(0, 1)
+        if k is not None:
+            k = k.contiguous().view(-1, batch_size * self.num_heads, self.head_dim).transpose(0, 1)
+        if v is not None:
+            v = v.contiguous().view(-1, batch_size * self.num_heads, self.head_dim).transpose(0, 1)
+
+        if saved_state is not None:
+
+            # saved states are stored with shape (batch_size, num_heads, seq_len, head_dim)
+            if 'prev_key' in saved_state:
+
+                prev_key = saved_state['prev_key'].view(batch_size * self.num_heads, -1, self.head_dim)
+
+                if static_kv:
+                    k = prev_key
+                else:
+                    k = torch.cat((prev_key, k), dim=1)
+
+            if 'prev_value' in saved_state:
+
+                prev_value = saved_state['prev_value'].view(batch_size * self.num_heads, -1, self.head_dim)
+
+                if static_kv:
+                    v = prev_value
+                else:
+                    v = torch.cat((prev_value, v), dim=1)
+
+            saved_state['prev_key'] = k.view(batch_size, self.num_heads, -1, self.head_dim)
+            saved_state['prev_value'] = v.view(batch_size, self.num_heads, -1, self.head_dim)
+
+            self._set_input_buffer(incremental_state, saved_state)
+
+        source_length = k.size(1)
+
+        if key_padding_mask is not None:
+
+            assert key_padding_mask.size(0) == batch_size
+            assert key_padding_mask.size(1) == source_length
+
+        if self.add_zero_attention:
+
+            source_length += 1
+
+            k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
+            v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
+
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask, attention_mask.new_zeros(attention_mask.size(0), 1)], dim=1)
+
+            if key_padding_mask is not None:
+                key_padding_mask = torch.cat(
+                    [key_padding_mask, torch.zeros(key_padding_mask.size(0), 1).type_as(key_padding_mask)], dim=1)
+
+        attention_output_weights = torch.bmm(q, k.transpose(1, 2))
+
+        assert list(attention_output_weights.size()) == [batch_size * self.num_heads, target_length, source_length]
+
+        if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(0)
+            attention_output_weights += attention_mask
+
+        if key_padding_mask is not None:
+
+            attention_output_weights = attention_output_weights.view(batch_size,
+                                                                     self.num_heads,
+                                                                     target_length,
+                                                                     source_length)
+
+            attention_output_weights = attention_output_weights.masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
+                float('-inf'),
+            )
+
+            attention_output_weights = attention_output_weights.view(batch_size * self.num_heads,
+                                                                     target_length,
+                                                                     source_length)
+
+        attention_output_weights = F.softmax(
+            attention_output_weights.float(), dim=-1,
+            dtype=torch.float32 if attention_output_weights.dtype == torch.float16 else attention_output_weights.dtype)
+        attention_output_weights = F.dropout(attention_output_weights,
+                                                               p=self.dropout,
+                                                               training=self.training)
+
+        attention_output = torch.bmm(attention_output_weights, v)
+
+        assert list(attention_output.size()) == [batch_size * self.num_heads, target_length, self.head_dim]
+
+        attention_output = attention_output.transpose(0, 1).contiguous().view(target_length,
+                                                                              batch_size,
+                                                                              embedding_dim)
+
+        attention_output = self.out_projection(attention_output)
+
+        if batch_first:
+            attention_output = attention_output.permute(1, 0, 2)
+
+        if need_weights:
+
+            # average attention weights over heads
+            attention_output_weights = attention_output_weights.view(batch_size,
+                                                                     self.num_heads,
+                                                                     target_length,
+                                                                     source_length)
+
+            attention_output_weights = attention_output_weights.sum(dim=1) / self.num_heads
+
+            if batch_first:
+                attention_output_weights = attention_output_weights.permute(1, 0, 2)
+
+        else:
+
+            attention_output_weights = None
+
+        if self.output_only:
+            return attention_output
+        else:
+            return attention_output, attention_output_weights
+
+    def _in_projection_qkv(self, query):
+        return self._in_projection(query).chunk(3, dim=-1)
+
+    def _in_projection_kv(self, key):
+        return self._in_projection(key, start=self.embedding_dim).chunk(2, dim=-1)
+
+    def _in_projection_q(self, query):
+        return self._in_projection(query, end=self.embedding_dim)
+
+    def _in_projection_k(self, key):
+        return self._in_projection(key, start=self.embedding_dim, end=2 * self.embedding_dim)
+
+    def _in_projection_v(self, value):
+        return self._in_projection(value, start=2 * self.embedding_dim)
+
+    def _in_projection(self, value, start=0, end=None):
+        weight = self.in_projection_weight
+        bias = self.in_projection_bias
+        weight = weight[start:end, :]
+        if bias is not None:
+            bias = bias[start:end]
+        return F.linear(value, weight, bias)
+
+    def extra_repr(self):
+
+        report = ['Heads: {}'.format(self.num_heads), self.model_report]
 
         return '\n'.join(report)
 
@@ -1026,8 +1388,8 @@ class SplitCrossEntropyLoss(BaseModule):
             # Perform the softmax calculation for the word vectors in the head for all splits
             # We need to guard against empty splits as torch.cat does not like random lists
 
-            head_res = torch.nn.functional.linear(hiddens, head_weight, bias=head_bias)
-            softmaxed_head_res = torch.nn.functional.log_softmax(head_res, dim=-1)
+            head_res = F.linear(hiddens, head_weight, bias=head_bias)
+            softmaxed_head_res = F.log_softmax(head_res, dim=-1)
 
         if splits is None:
             splits = list(range(self.nsplits))
@@ -1048,12 +1410,12 @@ class SplitCrossEntropyLoss(BaseModule):
                 tail_bias = bias[start:end]
 
                 # Calculate the softmax for the words in the tombstone
-                tail_res = torch.nn.functional.linear(hiddens, tail_weight, bias=tail_bias)
+                tail_res = F.linear(hiddens, tail_weight, bias=tail_bias)
 
                 # Then we calculate p(tombstone) * p(word in tombstone)
                 # Adding is equivalent to multiplication in log space
                 head_entropy = (softmaxed_head_res[:, -idx]).contiguous()
-                tail_entropy = torch.nn.functional.log_softmax(tail_res, dim=-1)
+                tail_entropy = F.log_softmax(tail_res, dim=-1)
 
                 results.append(head_entropy.view(-1, 1) + tail_entropy)
 
@@ -1129,8 +1491,8 @@ class SplitCrossEntropyLoss(BaseModule):
         # We need to guard against empty splits as torch.cat does not like random lists
         combo = torch.cat([split_hiddens[i] for i in range(self.nsplits) if len(split_hiddens[i])])
 
-        all_head_res = torch.nn.functional.linear(combo, head_weight, bias=head_bias)
-        softmaxed_all_head_res = torch.nn.functional.log_softmax(all_head_res, dim=-1)
+        all_head_res = F.linear(combo, head_weight, bias=head_bias)
+        softmaxed_all_head_res = F.log_softmax(all_head_res, dim=-1)
 
         if self.verbose or verbose:
             self.stats[0].append(combo.size()[0] * head_weight.size()[0])
@@ -1170,7 +1532,7 @@ class SplitCrossEntropyLoss(BaseModule):
                 indices = (split_targets[idx] - self.splits[idx]).view(-1, 1)
 
                 # Warning: if you don't squeeze, you get an N x 1 return, which acts oddly with broadcasting
-                tail_entropy = torch.gather(torch.nn.functional.log_softmax(tail_res, dim=-1),
+                tail_entropy = torch.gather(F.log_softmax(tail_res, dim=-1),
                                             dim=1, index=indices).squeeze()
 
                 entropy = -(head_entropy + tail_entropy)
