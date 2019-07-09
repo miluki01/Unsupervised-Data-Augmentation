@@ -945,7 +945,7 @@ class ScaledDotProductAttention(BaseModule):
             return output
 
 
-class OldMultiheadAttention(BaseModule):
+class VanillaMultiheadAttention(BaseModule):
     """
     From transformer
     """
@@ -1073,11 +1073,13 @@ class MultiheadAttention(BaseModule):
         self._reset_parameters()
 
     def _reset_parameters(self):
+
         torch.nn.init.xavier_uniform_(self.in_projection_weight[:self.embedding_dim, :])
         torch.nn.init.xavier_uniform_(self.in_projection_weight[self.embedding_dim:(self.embedding_dim * 2), :])
         torch.nn.init.xavier_uniform_(self.in_projection_weight[(self.embedding_dim * 2):, :])
 
         torch.nn.init.xavier_uniform_(self.out_projection.weight)
+
         if self.in_projection_bias is not None:
             torch.nn.init.constant_(self.in_projection_bias, 0.)
             torch.nn.init.constant_(self.out_projection.bias, 0.)
